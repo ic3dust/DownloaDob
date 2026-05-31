@@ -1,0 +1,11 @@
+Copyright (c) 2026 ic3dust
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files, to view, read, and study 
+the source code for educational purposes only.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+Strictly Prohibited:
+1. Publicly hosting, deploying, or mirroring this software as a live service.
+2. Commercially exploiting or redistributing the source code or its visual assets.
