@@ -11,132 +11,188 @@ from app.services.parser import extract_metadata
 
 router = APIRouter(prefix="/api")
 
-
-@router.post("/parse")
-def parse_url(data: ParseRequest):
-    return extract_metadata(data.url)
-
-
-def cleanup_temp_dir(path: str):
-    if os.path.exists(path):
-        shutil.rmtree(path)
-
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
-    ),
+    )
+}
+
+TIKTOK_EXTRACTOR_ARGS = {
+    "tiktok": {
+        "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
+        "app_version": ["33.3.3"],
+    }
 }
 
 
-def find_output_file(directory: str) -> str:
-    """Return the first file found in directory, ignoring subdirs."""
-    for name in os.listdir(directory):
-        full = os.path.join(directory, name)
-        if os.path.isfile(full):
-            return full
-    raise FileNotFoundError(f"No output file found in {directory}")
+# -------------------------
+# cleanup
+# -------------------------
+def cleanup_temp_dir(path: str):
+    if os.path.exists(path):
+        shutil.rmtree(path)
 
 
-@router.get("/download-video")
-@router.get("/download-video")
+def sanitize_filename(name: str) -> str:
+    return "".join(c for c in name if c.isalnum() or c in " _-").strip()
+
+
+def get_single_file(directory: str) -> str:
+    return next(
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    )
+
+
+# -------------------------
+# PARSE
+# -------------------------
+@router.post("/parse")
+def parse_url(data: ParseRequest):
+    return extract_metadata(data.url)
+
+
+# -------------------------
+# VIDEO DOWNLOAD
+# -------------------------
+@router.get("/video")
 def download_video(
     url: str = Query(...),
     format_id: str = Query(...),
-    with_audio: bool = Query(False),
+    with_audio: bool = Query(True),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     temp_dir = tempfile.mkdtemp()
     raw_dir = os.path.join(temp_dir, "raw")
-    os.makedirs(raw_dir)
+    os.makedirs(raw_dir, exist_ok=True)
 
-    # For +audio: try merging with bestaudio, fall back to format alone
-    # (TikTok formats are pre-muxed so separate bestaudio doesn't exist)
-    format_spec = f"{format_id}+bestaudio/{format_id}" if with_audio else format_id
+    if format_id == "video_muted":
+        format_spec = "bestvideo/best"
+        remove_audio = True
+    elif not with_audio:
+        format_spec = format_id
+        remove_audio = True
+    else:
+        # Always attempt to merge with best audio.
+        # yt-dlp will use the existing audio if the format already has it,
+        # or fetch a separate audio stream if it doesn't.
+        format_spec = f"{format_id}+bestaudio/bestvideo+bestaudio/best"
+        remove_audio = False
 
     ydl_opts = {
         "format": format_spec,
-        "outtmpl": os.path.join(raw_dir, "raw.%(ext)s"),
+        "outtmpl": os.path.join(raw_dir, "%(title)s.%(ext)s"),
         "quiet": True,
         "http_headers": HEADERS,
-        "merge_output_format": "mkv",
+        "merge_output_format": "mp4",
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
+        "concurrent_fragment_downloads": 3,
+        "extractor_args": TIKTOK_EXTRACTOR_ARGS,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=True)
 
-        raw_file = find_output_file(raw_dir)
-        output_file = os.path.join(temp_dir, "output.mp4")
+        title = sanitize_filename(info.get("title", "video"))
+        input_file = get_single_file(raw_dir)
+        output_file = os.path.join(temp_dir, f"{title}.mp4")
 
-        if with_audio:
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", raw_file,
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-movflags", "+faststart",
-                output_file,
-            ]
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", input_file,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-movflags", "+faststart",
+        ]
+
+        if remove_audio:
+            ffmpeg_cmd += ["-an"]
         else:
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", raw_file,
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-an",
-                "-movflags", "+faststart",
-                output_file,
-            ]
+            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "192k"]
+
+        ffmpeg_cmd.append(output_file)
 
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+
         if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+            raise RuntimeError(result.stderr)
 
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return {"error": str(e)}
 
     background_tasks.add_task(cleanup_temp_dir, temp_dir)
-    return FileResponse(path=output_file, media_type="video/mp4", filename="video.mp4")
+
+    return FileResponse(
+        path=output_file,
+        media_type="video/mp4",
+        filename=f"{title}.mp4",
+    )
 
 
-@router.get("/download-audio")
+# -------------------------
+# AUDIO DOWNLOAD
+# -------------------------
+@router.get("/audio")
 def download_audio(
     url: str = Query(...),
     format_id: str = Query(...),
+    codec: str = Query("m4a"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     temp_dir = tempfile.mkdtemp()
+    raw_dir = os.path.join(temp_dir, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+
+    format_spec = "bestaudio/best" if format_id == "audio_extract" else format_id
 
     ydl_opts = {
-        "format": format_id,
-        "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
+        "format": format_spec,
+        "outtmpl": os.path.join(raw_dir, "%(title)s.%(ext)s"),
         "quiet": True,
         "http_headers": HEADERS,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "m4a",
+                "preferredcodec": codec,
                 "preferredquality": "0",
             }
         ],
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
+        "extractor_args": TIKTOK_EXTRACTOR_ARGS,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=True)
 
-        output = find_output_file(temp_dir)
+        title = sanitize_filename(info.get("title", "audio"))
+
+        output_file = None
+        for file in os.listdir(raw_dir):
+            if file.endswith(f".{codec}"):
+                output_file = os.path.join(raw_dir, file)
+                break
+
+        if not output_file:
+            raise RuntimeError("Audio extraction failed")
+
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return {"error": str(e)}
 
     background_tasks.add_task(cleanup_temp_dir, temp_dir)
-    return FileResponse(path=output, media_type="audio/mp4", filename="audio.m4a")
+
+    return FileResponse(
+        path=output_file,
+        media_type="audio/mp4" if codec == "m4a" else "audio/mpeg",
+        filename=f"{title}.{codec}",
+    )

@@ -1,6 +1,21 @@
 import yt_dlp
 
 
+def extract_thumbnail(info: dict):
+    """
+    Robust thumbnail extraction for TikTok / Instagram / YouTube
+    """
+    if info.get("thumbnail"):
+        return info["thumbnail"]
+
+    thumbnails = info.get("thumbnails") or []
+    for t in thumbnails:
+        if isinstance(t, dict) and t.get("url"):
+            return t["url"]
+
+    return None
+
+
 def extract_metadata(url: str):
     ydl_opts = {
         "quiet": True,
@@ -13,55 +28,58 @@ def extract_metadata(url: str):
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         },
+        "extractor_args": {
+        "tiktok": {
+            "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
+            "app_version": ["33.3.3"],
+        }},
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
         formats_list = []
-        seen_resolutions = set()
+        seen = set()
 
         for f in info.get("formats", []):
-            acodec = f.get("acodec") or ""
             vcodec = f.get("vcodec") or ""
+            acodec = f.get("acodec") or ""
 
-            has_video = vcodec not in ("none", "")
-            has_audio = acodec not in ("none", "")
+            has_video = vcodec != "none" and vcodec != ""
+            has_audio = acodec != "none" and acodec != ""
 
-            if not has_audio and not has_video:
+            if not has_video and not has_audio:
                 continue
 
-            stream_type = (
-                "muxed"      if (has_video and has_audio) else
-                "video_only" if has_video                 else
-                "audio_only"
-            )
+            if has_video and has_audio:
+                stream_type = "muxed"
+            elif has_video:
+                stream_type = "video_only"
+            else:
+                stream_type = "audio_only"
 
             ext = f.get("ext") or "mp4"
 
-            # Skip webm audio — converts to m4a anyway, redundant
-            if stream_type == "audio_only" and ext == "webm":
-                continue
-
-            # Fix mp4-container audio label
+            # normalize audio extension
             if stream_type == "audio_only" and ext == "mp4":
                 ext = "m4a"
 
+            # resolution handling
             if stream_type == "audio_only":
                 abr = f.get("abr")
                 resolution = f"{int(abr)}kbps" if abr else "Audio Track"
             else:
                 resolution = f.get("resolution")
+
                 if not resolution or resolution == "null":
                     w, h = f.get("width"), f.get("height")
-                    resolution = f"{w}x{h}" if (w and h) else "Adaptive"
+                    resolution = f"{w}x{h}" if w and h else "Adaptive"
 
-                res_key = (stream_type, resolution)
-                if res_key in seen_resolutions:
+                key = (stream_type, resolution)
+                if key in seen:
                     continue
-                seen_resolutions.add(res_key)
+                seen.add(key)
 
-            # THIS was outside the loop before — now correctly indented inside
             formats_list.append({
                 "format_id": f.get("format_id"),
                 "ext": ext,
@@ -71,9 +89,29 @@ def extract_metadata(url: str):
                 "note": f.get("format_note") or "",
             })
 
+        # Always inject audio fallback option
+        formats_list.append({
+            "format_id": "audio_extract",
+            "ext": "m4a",
+            "resolution": "Audio Only",
+            "filesize": None,
+            "type": "audio_only",
+            "note": "Extract best available audio",
+        })
+
+        # Optional: inject silent video fallback (for TikTok-like sources)
+        formats_list.append({
+            "format_id": "video_muted",
+            "ext": "mp4",
+            "resolution": "Best Video (No Audio)",
+            "filesize": None,
+            "type": "video_only",
+            "note": "Remove audio after download",
+        })
+
         return {
             "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
+            "thumbnail": extract_thumbnail(info),
             "duration": info.get("duration"),
             "url": url,
             "formats": formats_list,
