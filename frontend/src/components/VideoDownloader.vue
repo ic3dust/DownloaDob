@@ -2,7 +2,7 @@
 
 <template>
   <div class="downloader-container">
-    <h2 class="game-title">Ultimate media downloader</h2>
+    <h2 class="game-title" style="cursor:default;">Ultimate media downloader</h2>
 
     <div class="input-group">
       <input
@@ -18,7 +18,7 @@
         class="pixel-btn primary"
         style="font-size: 28px"
       >
-        {{ loading ? "Analyzing..." : "Parse Link" }}
+        {{ loading ? "Parsing..." : "Parse Link" }}
       </button>
     </div>
 
@@ -29,10 +29,10 @@
     <div v-if="apiData" class="results-layout pixel-box">
       <div class="media-banner">
         <img
-          :src="apiData.thumbnail"
-          alt="Media Thumbnail"
-          class="thumbnail-img"
-        />
+  :src="`http://localhost:8000/api/thumbnail?url=${encodeURIComponent(apiData.thumbnail)}`"
+  alt="Media Thumbnail"
+  class="thumbnail-img"
+/>
         <div class="meta-text">
           <h3>{{ apiData.title }}</h3>
           <p v-if="apiData.duration">
@@ -54,7 +54,7 @@
                 <span class="pixel-badge success">{{ f.ext }}</span>
               </div>
               <span class="resolution-text">{{ f.resolution }}</span>
-              <p class="size-text">{{ formatSize(f.filesize) }}</p>
+              <p class="size-text">Adaptive Size</p>
             </div>
             <button
               @click="downloadVideo(f.format_id, true)"
@@ -162,14 +162,19 @@
 import { ref, computed } from "vue";
 
 const API = "http://127.0.0.1:8000/api";
+
 const mediaUrl = ref("");
 const loading = ref(false);
 const apiData = ref(null);
 const error = ref(null);
 
+const emit = defineEmits(["loading"]);
+
 const parseLink = async () => {
   if (!mediaUrl.value) return;
+
   loading.value = true;
+  emit("loading", true);
   error.value = null;
   apiData.value = null;
 
@@ -179,16 +184,21 @@ const parseLink = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: mediaUrl.value }),
     });
+
     const data = await response.json();
-    if (data.error) {
-      error.value = data.error;
-    } else {
-      apiData.value = data;
+
+    if (!response.ok || data.error) {
+      error.value = data.error || "Failed to parse media.";
+      return;
     }
-  } catch {
+
+    apiData.value = data;
+
+  } catch (e) {
     error.value = "Could not connect to backend Python API.";
   } finally {
     loading.value = false;
+    emit("loading", false);
   }
 };
 
@@ -204,7 +214,7 @@ const audioStreams = computed(
 
 const formatSize = (bytes) => {
   if (!bytes) return "Adaptive Size";
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `~ ${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 const formatDuration = (seconds) => {
@@ -453,6 +463,7 @@ const downloadAudio = (formatId) => {
   font-size: 18px;
   color: var(--text);
   margin: 0;
+  white-space: pre-line;
 }
 .error-message {
   color: var(--pixel-error);

@@ -96,14 +96,14 @@ def extract_metadata(url: str):
             "resolution": "Audio Only",
             "filesize": None,
             "type": "audio_only",
-            "note": "Extract best available audio",
+            "note": "\nBest available audio",
         })
 
         # Optional: inject silent video fallback (for TikTok-like sources)
         formats_list.append({
             "format_id": "video_muted",
             "ext": "mp4",
-            "resolution": "Best Video (No Audio)",
+            "resolution": "Best available video",
             "filesize": None,
             "type": "video_only",
             "note": "Remove audio after download",

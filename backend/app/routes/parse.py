@@ -2,10 +2,10 @@ import os
 import shutil
 import tempfile
 import subprocess
-from fastapi import APIRouter, Query, BackgroundTasks
+from fastapi import APIRouter, Query, BackgroundTasks, Response
 from fastapi.responses import FileResponse
 import yt_dlp
-
+import requests
 from app.models.req import ParseRequest
 from app.services.parser import extract_metadata
 
@@ -47,6 +47,24 @@ def get_single_file(directory: str) -> str:
     )
 
 
+@router.get("/thumbnail")
+def thumbnail(url: str):
+    print("FETCHING:", url)
+
+    r = requests.get(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        },
+        timeout=20,
+    )
+
+    print("STATUS:", r.status_code)
+
+    return Response(
+        content=r.content,
+        media_type=r.headers.get("content-type", "image/jpeg"),
+    )
 # -------------------------
 # PARSE
 # -------------------------
@@ -69,33 +87,23 @@ def download_video(
     raw_dir = os.path.join(temp_dir, "raw")
     os.makedirs(raw_dir, exist_ok=True)
 
-    if format_id == "video_muted":
-        format_spec = "bestvideo/best"
-        remove_audio = True
-    elif not with_audio:
-        format_spec = format_id
-        remove_audio = True
-    else:
-        # Always attempt to merge with best audio.
-        # yt-dlp will use the existing audio if the format already has it,
-        # or fetch a separate audio stream if it doesn't.
-        format_spec = f"{format_id}+bestaudio/bestvideo+bestaudio/best"
-        remove_audio = False
-
-    ydl_opts = {
-        "format": format_spec,
-        "outtmpl": os.path.join(raw_dir, "%(title)s.%(ext)s"),
-        "quiet": True,
-        "http_headers": HEADERS,
-        "merge_output_format": "mp4",
-        "retries": 10,
-        "fragment_retries": 10,
-        "socket_timeout": 30,
-        "concurrent_fragment_downloads": 3,
-        "extractor_args": TIKTOK_EXTRACTOR_ARGS,
-    }
-
     try:
+        # -----------------------------
+        # ALWAYS allow audio fallback
+        # -----------------------------
+        ydl_opts = {
+            "format": f"{format_id}+bestaudio/best",
+            "outtmpl": os.path.join(raw_dir, "%(title)s.%(ext)s"),
+            "quiet": True,
+            "http_headers": HEADERS,
+            "retries": 10,
+            "fragment_retries": 10,
+            "socket_timeout": 30,
+            "concurrent_fragment_downloads": 3,
+            "extractor_args": TIKTOK_EXTRACTOR_ARGS,
+            "progress_hooks": [progress_hook],
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
@@ -103,20 +111,37 @@ def download_video(
         input_file = get_single_file(raw_dir)
         output_file = os.path.join(temp_dir, f"{title}.mp4")
 
+        # -----------------------------
+        # FORCE SAFE PLAYBACK FORMAT
+        # (Fix HEVC / codec pack issues)
+        # -----------------------------
         ffmpeg_cmd = [
-            "ffmpeg", "-y", "-i", input_file,
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-movflags", "+faststart",
+            "ffmpeg",
+            "-y",
+            "-i", input_file,
+            "-map", "0:v:0",
         ]
 
-        if remove_audio:
-            ffmpeg_cmd += ["-an"]
+        if with_audio:
+            ffmpeg_cmd += [
+                "-map", "0:a:0?",
+                "-c:v", "libx264",   # FORCE H.264
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                output_file,
+            ]
         else:
-            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "192k"]
-
-        ffmpeg_cmd.append(output_file)
+            ffmpeg_cmd += [
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-an",
+                "-movflags", "+faststart",
+                output_file,
+            ]
 
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
 
@@ -168,6 +193,7 @@ def download_audio(
         "fragment_retries": 10,
         "socket_timeout": 30,
         "extractor_args": TIKTOK_EXTRACTOR_ARGS,
+        "progress_hooks": [progress_hook],
     }
 
     try:
